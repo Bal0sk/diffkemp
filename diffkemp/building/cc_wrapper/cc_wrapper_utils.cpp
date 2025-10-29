@@ -20,6 +20,8 @@ bool ends_with(const std::string &str, const std::string &suffix) {
                       == 0;
 }
 
+// When making changes to this function, same changes need to be made
+// in diffkemp/llvm_ir/compiler.py
 std::vector<std::string> get_clang_default_options(bool default_optim = false) {
     std::vector<std::string> options;
     options = {

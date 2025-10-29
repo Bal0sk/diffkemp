@@ -29,7 +29,7 @@ struct Own_args {
         clang = own_args["clang"];
         clang_append = own_args["cla"];
         clang_drop = own_args["cld"];
-        debug = (own_args["debug"] == "2");
+        debug = (own_args["debug"] == "1");
         llvm_link = own_args["llink"];
         llvm_dis = own_args["lldis"];
         no_opt_override = (own_args["noo"] == "1");
