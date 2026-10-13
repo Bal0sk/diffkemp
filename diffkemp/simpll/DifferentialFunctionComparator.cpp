@@ -722,7 +722,7 @@ bool DifferentialFunctionComparator::maySkipLoad(const LoadInst *Load) const {
                 Replacement = ReplacementCandidate;
                 checkPredecessors = false;
                 break;
-            } else if (mayStoreTo(&*it, Load->getPointerOperand())) {
+            } else if (mayClobberPtr(&*it, Load)) {
                 // Fail if a possibly conflicting store or call is found.
                 return false;
             }
@@ -2397,102 +2397,32 @@ bool DifferentialFunctionComparator::hasConflictingStoreInBlockPrefix(
         if (&Inst == Load) {
             break;
         }
-        if (mayClobberPtr(&Inst, Load->getPointerOperand())) {
+        if (mayClobberPtr(&Inst, Load)) {
             return true;
         }
     }
     return false;
 }
 
-/// Decompose a pointer into its base and a path of GEP indices (constant
-/// indices are stored as their values, non-constant ones as nullopt).
-static const Value *decomposePtr(const Value *Ptr,
-                                 std::vector<std::optional<int64_t>> &Path) {
-    while (true) {
-        Ptr = Ptr->stripPointerCasts();
-        auto GEP = dyn_cast<GEPOperator>(Ptr);
-        if (!GEP) {
-            break;
-        }
-        std::vector<std::optional<int64_t>> GEPPath;
-        for (auto &Idx : make_range(GEP->idx_begin(), GEP->idx_end())) {
-            if (auto Const = dyn_cast<ConstantInt>(Idx.get())) {
-                GEPPath.push_back(Const->getSExtValue());
-            } else {
-                GEPPath.push_back(std::nullopt);
-            }
-        }
-        Path.insert(Path.begin(), GEPPath.begin(), GEPPath.end());
-        Ptr = GEP->getPointerOperand();
-    }
-    return Ptr;
-}
-
-/// Check whether two pointers may point to overlapping memory.
-/// Pointers with different bases are assumed not to overlap.
-/// Pointers with the same base are compared field-sensitively:
-/// if the corresponding GEP indices are constant and different,
-/// the pointers point to different fields and do not overlap.
-/// A pointer used directly (without a GEP) is treated as a pointer to the
-/// first field (an all-zero index path).
-bool DifferentialFunctionComparator::ptrsMayOverlap(const Value *PtrA,
-                                                    const Value *PtrB) const {
-    PtrA = resolveReplacements(PtrA);
-    PtrB = resolveReplacements(PtrB);
-    if (PtrA == PtrB) {
-        return true;
-    }
-
-    std::vector<std::optional<int64_t>> PathA, PathB;
-    auto BaseA = decomposePtr(PtrA, PathA);
-    auto BaseB = decomposePtr(PtrB, PathB);
-    if (BaseA != BaseB) {
-        return false;
-    }
-
-    // Pad the shorter path with zeros (direct pointer = first field).
-    auto MaxSize = std::max(PathA.size(), PathB.size());
-    PathA.resize(MaxSize, 0);
-    PathB.resize(MaxSize, 0);
-    for (unsigned i = 0; i < MaxSize; ++i) {
-        if (PathA[i] && PathB[i] && *PathA[i] != *PathB[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/// Check whether the given instruction may overwrite the memory that
-/// a load from the given pointer reads. Stores are checked field-sensitively.
-/// A call is considered clobbering when any of its pointer arguments may
-/// overlap with the given pointer. Note the pragmatic assumption here:
-/// a function cannot access the memory unless it receives a pointer to it
-/// (globals and pointers stored in other structures are not considered).
+/// Check whether the given instruction may overwrite the memory that the
+/// given load reads. Uses the module's alias analysis (BasicAA, GlobalsAA
+/// and existing function attributes) with the load's exact location
+/// (pointer and size).
 bool DifferentialFunctionComparator::mayClobberPtr(const Instruction *Inst,
-                                                   const Value *Ptr) const {
-    if (auto Store = dyn_cast<StoreInst>(Inst)) {
-        return ptrsMayOverlap(Store->getPointerOperand(), Ptr);
-    }
-    if (auto Call = dyn_cast<CallInst>(Inst)) {
-        if (isDebugInfo(*Call)) {
-            return false;
-        }
-        if (auto Intr = dyn_cast<IntrinsicInst>(Call)) {
-            // Lifetime markers and assumptions do not write memory.
-            if (Intr->getIntrinsicID() == Intrinsic::lifetime_start
-                || Intr->getIntrinsicID() == Intrinsic::lifetime_end
-                || Intr->getIntrinsicID() == Intrinsic::assume) {
-                return false;
-            }
-        }
-        for (const auto &Arg : Call->args()) {
-            if (Arg->getType()->isPointerTy() && ptrsMayOverlap(Arg, Ptr)) {
-                return true;
-            }
-        }
+                                                   const LoadInst *Load) const {
+    if (!Inst->mayWriteToMemory() || isDebugInfo(*Inst)) {
         return false;
     }
-    return Inst->mayWriteToMemory();
+    if (auto Intr = dyn_cast<IntrinsicInst>(Inst)) {
+        // Lifetime markers and assumptions do not write memory.
+        if (Intr->getIntrinsicID() == Intrinsic::lifetime_start
+            || Intr->getIntrinsicID() == Intrinsic::lifetime_end
+            || Intr->getIntrinsicID() == Intrinsic::assume) {
+            return false;
+        }
+    }
+    AAResults &AA = ModComparator->getAA(Inst->getFunction());
+    return isModSet(AA.getModRefInfo(Inst, MemoryLocation::get(Load)));
 }
 
 /// Try to find a value that the given load must yield: either a previous load
@@ -2558,7 +2488,7 @@ const Value *DifferentialFunctionComparator::findLoadReplacement(
                 Replacement = ReplacementCandidate;
                 checkPredecessors = false;
                 break;
-            } else if (mayClobberPtr(&*it, Ptr)) {
+            } else if (mayClobberPtr(&*it, Load)) {
                 return nullptr;
             }
         }

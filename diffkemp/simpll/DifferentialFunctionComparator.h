@@ -375,14 +375,9 @@ class DifferentialFunctionComparator : public FunctionComparator {
     /// beginning of the basic block of the given load and the load itself.
     bool hasConflictingStoreInBlockPrefix(const LoadInst *Load) const;
 
-    /// Check whether two pointers may point to overlapping memory.
-    /// Pointers with the same base are compared field-sensitively using
-    /// constant GEP indices.
-    bool ptrsMayOverlap(const Value *PtrA, const Value *PtrB) const;
-
     /// Check whether the given instruction may overwrite the memory
-    /// that a load from the given pointer reads.
-    bool mayClobberPtr(const Instruction *Inst, const Value *Ptr) const;
+    /// that the given load reads.
+    bool mayClobberPtr(const Instruction *Inst, const LoadInst *Load) const;
 
     /// Try to find a value that the given load must yield: either a previous
     /// load from the same pointer or a value stored to the pointer by

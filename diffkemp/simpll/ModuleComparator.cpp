@@ -22,6 +22,45 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 
+/// Set up GlobalsAA + AAManager for one module.
+static void setUpModuleAliasAnalysis(Module &Mod,
+                                     ModuleAnalysisManager &MAM,
+                                     FunctionAnalysisManager &FAM) {
+    PassBuilder PB;
+    PB.registerModuleAnalyses(MAM);
+    MAM.registerPass([] { return GlobalsAA(); });
+    // Proxies both ways: GlobalsAA needs the FAM, AAManager needs the MAM.
+    MAM.registerPass(
+            [&FAM] { return FunctionAnalysisManagerModuleProxy(FAM); });
+    FAM.registerPass(
+            [&MAM] { return ModuleAnalysisManagerFunctionProxy(MAM); });
+
+    // Must run before registerFunctionAnalyses(), which would otherwise
+    // register its own default AAManager first (registerPass is first-wins).
+    AAManager AA = PB.buildDefaultAAPipeline();
+    AA.registerModuleAnalysis<GlobalsAA>();
+    FAM.registerPass([AA = std::move(AA)]() mutable { return std::move(AA); });
+    PB.registerFunctionAnalyses(FAM);
+
+    // AAManager only picks up an already-cached GlobalsAA result.
+    MAM.getResult<GlobalsAA>(Mod);
+}
+
+/// Set up alias analysis for both compared modules.
+void ModuleComparator::setUpAliasAnalysis() {
+    setUpModuleAliasAnalysis(First, MamFirst, FamFirst);
+    setUpModuleAliasAnalysis(Second, MamSecond, FamSecond);
+}
+
+/// Get alias analysis results for Fun's module.
+AAResults &ModuleComparator::getAA(const Function *Fun) {
+    Function *MutableFun = const_cast<Function *>(Fun);
+    if (Fun->getParent() == &First) {
+        return FamFirst.getResult<AAManager>(*MutableFun);
+    }
+    return FamSecond.getResult<AAManager>(*MutableFun);
+}
+
 /// Updates the statistics based on the results of function comparison.
 void ModuleComparator::updateStats(
         Result &result, const DifferentialFunctionComparator &fComp) {
@@ -170,6 +209,9 @@ void ModuleComparator::compareFunctions(Function *FirstFun,
             // of them only - this is to keep them synchronized.
             simplifyFunction(FirstFun);
             simplifyFunction(SecondFun);
+            // The functions changed, drop their cached alias analysis results.
+            FamFirst.invalidate(*FirstFun, PreservedAnalyses::none());
+            FamSecond.invalidate(*SecondFun, PreservedAnalyses::none());
 
             LOG_VERBOSE_EXTRA("Functions after inlining:\n"
                               << "L:\n"
